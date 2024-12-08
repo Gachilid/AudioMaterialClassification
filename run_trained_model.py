@@ -1,84 +1,97 @@
 def run_trained_model(X):
-    """
-    Run the trained model on the given input WAV file paths.
-    
-    Args:
-    X: array of shape (N,), where each element is a WAV file path.
+    import io
+    import os
+    import gdown
+    import torch
+    import torch.nn as nn
+    import torchvision.transforms as transforms
+    import librosa
+    import librosa.display
+    import numpy as np
+    import matplotlib.pyplot as plt
+    from PIL import Image
 
-    Returns:
-    predictions: array of shape (N,), where each element is the predicted class ID.
-    """
-    # Define the CNN classifier model to match the training architecture
+    # The class-to-label mapping must be exactly the same as in training
+    CLASS_TO_LABEL = {
+        'water': 0,
+        'table': 1,
+        'sofa': 2,
+        'railing': 3,
+        'glass': 4,
+        'blackboard': 5,
+        'ben': 6
+    }
+
+    # Model architecture must be the same as during training
     class CNNClassifier(nn.Module):
         def __init__(self, num_classes=7):
             super(CNNClassifier, self).__init__()
-            self.conv1 = nn.Conv2d(3, 32, kernel_size=5, stride=1, padding=2)  # Convolution layer 1
-            self.conv2 = nn.Conv2d(32, 64, kernel_size=5, stride=1, padding=2)  # Convolution layer 2
-            self.pool = nn.MaxPool2d(2, 2)  # Max pooling layer
-            self.fc1 = nn.Linear(64 * 32 * 32, num_classes)  # Fully connected layer
+            self.conv1 = nn.Conv2d(3, 32, kernel_size=5, stride=1, padding=2)
+            self.conv2 = nn.Conv2d(32, 64, kernel_size=5, stride=1, padding=2)
+            self.pool = nn.MaxPool2d(2, 2)
+            self.fc1 = nn.Linear(64 * 32 * 32, num_classes)
 
         def forward(self, x):
-            x = self.pool(torch.relu(self.conv1(x)))  # Apply first convolution, ReLU, and pooling
-            x = self.pool(torch.relu(self.conv2(x)))  # Apply second convolution, ReLU, and pooling
-            x = x.view(x.size(0), -1)  # Flatten feature maps
-            x = self.fc1(x)  # Apply the fully connected layer
+            x = self.pool(torch.relu(self.conv1(x)))
+            x = self.pool(torch.relu(self.conv2(x)))
+            x = x.view(x.size(0), -1)
+            x = self.fc1(x)
             return x
 
-    # Step 1: Featurize WAV files into Mel spectrograms
-    def featurize_wav_files(X, target_size=(128, 128)):
-        """
-        Featurize WAV files into consistent Mel spectrograms of the target size.
-        Args:
-        X: List of WAV file paths.
-        target_size: Target size (n_mels, time_frames) for spectrograms.
+    # Use the same transforms as in training
+    transform = transforms.Compose([
+        transforms.Resize((128, 128)),
+        transforms.ToTensor(),
+        transforms.Normalize((0.5,), (0.5,))
+    ])
 
-        Returns:
-        features: Numpy array of shape (N, 3, target_size[0], target_size[1]).
-        """
-        features = []
-        for file_path in X:
-            y, sr = librosa.load(file_path, sr=22050)  # Load WAV file
-            mel_spec = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=target_size[0])  # Generate Mel spectrogram
-            log_mel_spec = librosa.power_to_db(mel_spec, ref=np.max)  # Convert to log scale
+    # Function to convert a WAV file to a PNG image, following the logic used during training
+    def wav_to_png_image(file_path, sr=22050, n_mels=128, hop_length=512):
+        y, _ = librosa.load(file_path, sr=sr)
+        S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=n_mels, hop_length=hop_length)
+        S_db = librosa.power_to_db(S, ref=np.max)
 
-            # Resize time dimension to match target size
-            if log_mel_spec.shape[1] > target_size[1]:
-                log_mel_spec = log_mel_spec[:, :target_size[1]]  # Truncate
-            else:
-                pad_width = target_size[1] - log_mel_spec.shape[1]
-                log_mel_spec = np.pad(log_mel_spec, ((0, 0), (0, pad_width)), mode='constant')  # Pad
+        # Use the same plotting parameters as in training
+        plt.figure(figsize=(10,4))
+        librosa.display.specshow(S_db, sr=sr, hop_length=hop_length, x_axis='time', y_axis='mel')
+        plt.colorbar(format='%+2.0f dB')
+        plt.title(f'Mel Spectrogram: {os.path.basename(file_path)}')
+        plt.tight_layout()
 
-            # Expand to 3 channels to match the model's input requirements
-            log_mel_spec = np.stack([log_mel_spec] * 3, axis=0)
-            features.append(log_mel_spec)
-        return np.array(features)
+        # Save the plot to memory instead of a file
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        plt.close()
+        buf.seek(0)
 
-    # Featurize input WAV files
-    features = featurize_wav_files(X)
-    features = torch.tensor(features, dtype=torch.float32)  # Convert features to PyTorch tensor
+        # Load the PIL image from memory
+        image = Image.open(buf).convert('RGB')
+        return image
 
-    # Step 2: Download model weights
     def download_model_weights():
-        """
-        Download pre-trained model weights from Google Drive.
-        Returns:
-        Path to the downloaded weights file.
-        """
+        # Update the URL or file ID as needed
         url = "https://drive.google.com/uc?id=1Z79uSqiK079hGhXPZKXYsXBqhhHUH18p"
         output = "model_weights.pth"
-        gdown.download(url, output, fuzzy=True)  # Download the weights file
+        if not os.path.exists(output):
+            gdown.download(url, output, fuzzy=True)
         return output
 
-    # Load model weights
+    # Load model and weights
     weight_path = download_model_weights()
-
-    # Step 3: Setup the classifier and load the pre-trained weights
     model = CNNClassifier(num_classes=7)
-    model.load_state_dict(torch.load(weight_path, map_location=torch.device('cpu')))  # Load weights into model
-    model.eval()  # Set the model to evaluation mode
+    model.load_state_dict(torch.load(weight_path, map_location=torch.device('cpu')))
+    model.eval()
 
-    # Step 4: Perform inference
-    with torch.no_grad():  # Disable gradient calculations for inference
-        predictions = model(features).argmax(dim=1).numpy()  # Get the predicted class for each input
+    predictions = []
+    with torch.no_grad():
+        for file_path in X:
+            # 1. Convert WAV to PNG image (in memory)
+            image = wav_to_png_image(file_path)
+            # 2. Apply the same transforms as during training
+            input_tensor = transform(image).unsqueeze(0)  # [1, 3, 128, 128]
+            # 3. Model inference
+            outputs = model(input_tensor)
+            pred = outputs.argmax(dim=1).item()
+            predictions.append(pred)
 
-    return predictions
+    return np.array(predictions)
